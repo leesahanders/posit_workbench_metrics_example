@@ -1,0 +1,552 @@
+---
+title: "Posit Workbench Metrics"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+
+theme_set(theme_minimal())
+```
+
+## r-sessions 
+
+```{r}
+rsessions <- read.csv('colorado-3-r-sessions/r-sessions.csv')
+```
+
+
+## RRD files 
+
+The RRD files powering RStudio’s Administrative Dashboard are available for your own analysis, too. You can find them in </var/lib/rstudio-server/monitor/rrd> (unless you’ve changed `monitor-data-path` location). 
+
+Reference: <https://docs.posit.co/ide/server-pro/auditing_and_monitoring/monitoring_configuration.html#analyzing-rrd-files> 
+
+
+## Auditing logs 
+
+Posit Workbench can be optionally configured to write an audit log of session related events (e.g., login/logout, session start/suspend/exit) to a central location (the `/var/lib/rstudio-server/audit/r-sessions` directory by default). This feature can be enabled using the `audit-r-sessions` setting. 
+
+Reference: <https://docs.posit.co/ide/server-pro/auditing_and_monitoring/auditing_configuration.html#r-session-auditing> 
+
+Posit Workbench can be optionally configured to audit all R console activity by writing console input and output to a central location (the /var/lib/rstudio-server/audit/r-console directory by default). This feature can be enabled using the `audit-r-console` setting. 
+
+Reference: <https://docs.posit.co/ide/server-pro/auditing_and_monitoring/auditing_configuration.html#r-console-auditing> 
+
+
+## Prometheus endpoint 
+
+The preview prometheus metrics will be available in 2024.04.0 and consumed by Chronicle. This includes an active user count. <https://docs.posit.co/ide/server-pro/2024.04.0/auditing_and_monitoring/prometheus_metrics.html>
+
+We can preview an example here: <https://workbench.posit.it/metrics/> 
+
+Reference: <https://docs.posit.co/ide/server-pro/auditing_and_monitoring/monitoring_configuration.html> 
+
+
+## Chronicle 
+
+Using Chronicle data: <https://colorado.posit.co/rsc/chronicle-installation-guide/#using-chronicle-data> 
+
+See an example here: <https://connect.posit.it/content/6f974b94-888e-43f5-934e-deb2f95dbeec/chronicle_dashboard.html>
+
+Recommended System Requirements to render 1 month of Chronicle data:
+
+-   2GB Memory
+
+This document and its accompanying dashboard are aimed to work with the January 2024 month of Chronicle data.
+
+```{r setup-imports}
+#| output: false
+
+# Imports
+library(conflicted)
+library(tidyverse)
+library(gt)
+library(DBI)
+library(duckdb)
+library(plotly)
+library(arrow)
+library(paws)
+```
+
+```{r}
+# Collecting logs, metrics and user data from a file
+metrics <- arrow::open_dataset("pre-canned-chronicle-data-1-hour/")
+logs <- arrow::open_dataset("pre-canned-chronicle-data-1-hour/")
+users <- arrow::open_dataset("pre-canned-chronicle-data-1-hour/")
+```
+
+Alternatively you can access the data from s3 
+
+```r
+# Imports
+library(arrow)
+library(paws)
+
+# Set s3 bucket ----
+s3_bucket <- "s3://{{YOUR_BUCKET_NAME}}"
+svc <- s3(config = list(region = "us-east-2"))
+bucket_str <- svc$list_objects(Bucket = urltools::domain(s3_bucket))
+
+# Collecting log data
+logs_bucket <- paste0(s3_bucket, "/v1/logs/2023/12")
+logs <- open_dataset(logs_bucket,
+                     schema = NULL,
+                     hive_style = FALSE,
+                     format = "parquet",
+                     factory_options = list())
+
+# Collecting metrics data
+metrics_bucket <- paste0(s3_bucket, "/v1/metrics/2023/11")
+metrics <- open_dataset(metrics_bucket,
+                        schema = NULL,
+                        hive_style = FALSE,
+                        format = "parquet",
+                        factory_options = list())
+
+# Collecting user data
+users_bucket <- paste0(s3_bucket, "/v1/users/2023/11")
+users <- open_dataset(users_bucket,
+                      schema = NULL,
+                      hive_style = FALSE,
+                      format = "parquet",
+                      factory_options = list())
+```
+
+Chronicle data is stored as parquet files. The `arrow` package can be used to query this parquet data and create a local reference to the data.
+
+There are 3 distinct directories that Chronicle writes data to:
+
+\- **Metrics**: A collection of metrics that have been collected from Posit Workbench and Posit Connect
+
+\- **Logs**: Details from audit logs for Posit Workbench and Posit Connect
+
+\- **Users**: Details about users for Posit Connect
+
+**\## Data**
+
+**\### Logs**
+
+```r
+#| output: false
+logs_l <- logs |> 
+  collect()
+logs_l |> 
+  unnest(attributes) |> 
+  pivot_wider(names_from = key, values_from = value, values_fn = list, names_prefix = "attr_") |> 
+  count(cluster)
+
+file.create("pre-canned-chronicle-data-1-hour/logs.parquet")
+write_parquet(logs_l, "pre-canned-chronicle-data-1-hour/logs.parquet")
+```
+
+**\### Metrics**
+
+A list of metric values and associated counts:
+
+```r
+
+# ---- metric-counts ----
+metric_counts <- metrics |>
+  plotly::filter(Day <= 28) |> 
+  count(name, sort = TRUE) |>
+  collect()
+
+p <- ggplot(data=head(metric_counts, 5), aes(x=name, y=n, color=name)) +
+  geom_bar(stat="identity") +
+  # geom_bar() +
+  labs(x = "", y = "Count", color = "Metric Name", title = "Top 5 Metric Counts") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank())
+
+ggplotly(p)
+```
+
+Filter for the important metrics we want to look at:
+
+```r
+# ---- meaningful-metrics ----
+meaningful_metrics <- c(
+  # Workbench
+  # "system.cpu.time", 
+  # "pwb_session_duration_seconds", 
+  # "pwb_session_startup_and_connect_duration_seconds",
+  # "pwb_session_startup_duration_seconds", 
+  # "system.memory.usage", 
+  "pwb_sessions_launched_total", 
+  # "pwb_sessions_failed_total", 
+  "pwb_sessions", 
+  # "pwb_build_info", 
+  # "pwb_active_user_sessions", 
+  "pwb_license_expiry", 
+  # "pwb_last_active_session_time", 
+  "pwb_license_user_seats", 
+  "pwb_license_active_users",
+  
+  # Connect
+  "connect_license_active_users",
+  "connect_content",
+  "connect_content_visits_total",
+  "connect_content_session_duration_seconds"
+)
+```
+
+In order to take the unstructured metric `parquet` data and transform it into "tidy"data-sets, we'll create a unique table file for each different metric that is collected. This enables proper un-nesting of each attribute for each metric.
+
+```r
+#| eval: false
+
+# ---- extract-metric ----
+# [TODO] - Check most recent date in DuckDB table and only extract data newer than that date
+extract_metric <- function(metric_name) {
+  
+  print(metric_name)
+  data <- metrics |> 
+    plotly::filter(name == metric_name) |> 
+    collect()
+  
+  # Some metrics don't have a nested attributes field, so that needs to be handled
+  nested_attributes <- tryCatch(dim(data$attributes[[1]])[1] != 0, error = function(e) FALSE)
+  if (nested_attributes) {
+    data <- data |> 
+      unnest(attributes) |> 
+      pivot_wider(names_from = key, values_from = value, values_fn = max, names_glue = "attribute_{key}")
+  } else {
+    data <- data |> 
+     select(-attributes)
+  }
+  if (length(data) > 0) {
+    print(data)
+    print(length(data))
+    file.create(paste0("data/local/", metric_name, ".parquet"))
+    write_parquet(data, paste0("data/local/", metric_name, ".parquet"))
+  }
+}
+
+
+# Currently disabled, we do a for loop instead to prevent grabbing
+# too much memory
+for (metric_name in meaningful_metrics)
+   extract_metric(metric_name)
+  
+# In order to speed up the ETL process, you can use the `furrr` package to run the
+# `extract_metric` function in parallel insteadL
+# future::plan(future::multisession, workers = 5)
+# furrr::future_walk(meaningful_metrics, extract_metric, .progress = TRUE)
+```
+
+If your system has the resources and you'd like to speed up the ETL process, un-comment and use the `furrr` package to run the `extract_metric` function in parallel.
+
+**\### Users**
+
+Create a reference to the users data (note this data is only for Posit Connect):
+
+```r
+#| include: false
+
+# Collecting user data
+users_l <- users |> 
+  group_by(id, username, email, first_name, last_name, user_role) |> 
+  summarise(created_at = min(created_at), updated_at = max(updated_at),last_active_at = max(last_active_at)) |> 
+  distinct() |> 
+  collect()
+
+file.create("data/local/users.parquet")
+write_parquet(users_l, "data/local/users.parquet")
+```
+
+**\### Using DuckDB**
+
+Now we'll load all the local `parquet` data into [DuckDB](https://duckdb.org/), for easier querying later:
+
+```r
+#| eval: false
+
+# ---- duckdb ----
+con <- dbConnect(duckdb::duckdb(), "data/localdb.duckdb")
+fs::dir_ls("data/local") |> 
+  walk(\(file) {
+    table_name <- fs::path_file(file) |> 
+      str_remove(".parquet") |> 
+      str_replace_all("\\.", "_")
+    
+    if (DBI::dbExistsTable(con, table_name)) return()
+    
+    data <- read_parquet(file)
+    print(data)
+    dbWriteTable(con, table_name, data) 
+  })
+
+dbListTables(con)
+dbDisconnect(con, shutdown=TRUE)
+```
+
+```r
+# Data ----
+con <- dbConnect(duckdb::duckdb(), "data/localdb.duckdb", read_only = TRUE)
+```
+
+**\# Posit Workbench**
+
+**\## Workbench Users**
+
+```r
+#| content: valuebox
+wb_active_users <- tbl(con, "pwb_license_active_users")
+wb_license_allotment <- tbl(con, "pwb_license_user_seats")
+
+# Get current number of active WB users
+active_wb_users <- wb_active_users |> 
+  select(timestamp, value_float) |> 
+  plotly::filter(timestamp == max(timestamp)) |> 
+  distinct() |> 
+  pull(value_float)
+
+license_allotment <- wb_license_allotment |> 
+  select(timestamp, value_float) |>
+  plotly::filter(timestamp == max(timestamp)) |> 
+  distinct() |> 
+  pull(value_float)
+
+
+warn_level = license_allotment-2
+
+fig <- plot_ly(
+  domain = list(x = c(0, 1), y = c(0, 1)),
+  value = active_wb_users,
+  title = list(text = "Active Workbench Users"),
+  type = "indicator",
+  mode = "gauge+number+delta",
+  # delta = list(reference = 380),
+  gauge = list(
+    axis =list(range = list(NULL, license_allotment+2)),
+    steps = list(
+      list(range = c(0, warn_level), color = "lightgray"),
+      list(range = c(warn_level, license_allotment), color = "yellow"),
+      list(range = c(license_allotment, license_allotment+2), color = "red")))
+)
+fig <- fig %>%
+  plotly::layout(margin = list(l=20,r=30))
+
+fig
+
+```
+
+```r
+#| content: valuebox
+
+wb_license_expiration <- tbl(con, "pwb_license_expiry")
+
+# Get license expiration date
+license_expiration_date <- wb_license_expiration |> 
+  select(timestamp, value_float) |> 
+  plotly::filter(timestamp == max(timestamp)) |> 
+  distinct() |> 
+  pull(value_float) |> 
+  as_datetime()
+
+wb_days_until_expiration <- as.numeric(difftime(license_expiration_date, Sys.Date(), units = "days"))
+
+if(wb_days_until_expiration > 30) vb_color <- "success"
+if(wb_days_until_expiration <= 30) vb_color <- "warning"
+if(wb_days_until_expiration <= 7) vb_color <- "danger"
+
+list(
+  icon = "clock-history",
+  color = vb_color,
+  value = paste0(wb_days_until_expiration, " days until license expiration")
+)
+```
+
+**:::**
+
+**\## Workbench Sessions**
+
+**::: {.card}**
+
+```r
+#| content: valuebox
+# Create dynamic title
+wb_launched_sessions <- tbl(con, "pwb_sessions_launched_total")
+min_date <-  wb_launched_sessions |> 
+  summarize(min_timestamp = min(timestamp)) |> 
+  pull(min_timestamp) |> 
+  as.Date()
+
+cat("title=", "Workbench sessions since ", as.character(as.Date(min_date)), sep="")
+
+cummulative_sessions <-  wb_launched_sessions |>
+  group_by(attribute_type) |> 
+  summarise(sessions = max(value_float)) |> 
+  summarise(total_sessions = sum(sessions)) |> 
+  pull(total_sessions)
+  
+list(
+  icon = "person-workspace",
+  color = "info",
+  value = paste(cummulative_sessions, "sessions")
+)
+```
+
+```r
+wb_launched_sessions_l <- wb_launched_sessions |> 
+  select(timestamp, cummulative_sessions = value_float, session_type = attribute_type) |> 
+  group_by(date = as.Date(timestamp), session_type) |>
+  summarise(cummulative_sessions = max(cummulative_sessions)) |> 
+  collect()
+
+
+p <- wb_launched_sessions_l |> 
+  ggplot(aes(x = date, y = cummulative_sessions, color = session_type)) +
+  geom_line() +
+  labs(x = "", y = "Cummulative Sessions", color = "Session Type", title = "Cumulative Workbench Sessions")
+
+ggplotly(p)
+```
+
+```r
+wb_sessions <- tbl(con, "pwb_sessions")
+p <- wb_sessions |> 
+  plotly::filter(attribute_status == "Running") |> 
+  select(timestamp, value_float, attribute_type) |> 
+  collect() |> 
+  ggplot(aes(x = timestamp, y = value_float, color = attribute_type)) +
+  geom_line() +
+  labs(x = "", y = "Running Sessions", color = "Session Type", title = "Running Sessions")
+
+ggplotly(p)
+```
+
+```r
+ct_content_visits <- tbl(con, "connect_content_visits_total")
+content_visits_list <- ct_content_visits |>
+  select(attribute_content_name, value_int) %>%
+  group_by(attribute_content_name) |>
+  summarise(count = max(value_int))
+
+content_visits_list
+```
+
+**:::**
+
+**\# Posit Connect**
+
+**\## Connect Users**
+
+```r
+#| content: valuebox
+connect_active_users <- tbl(con, "connect_license_active_users")
+
+# Get current number of active WB users
+connect_active_users <- connect_active_users |> 
+  select(timestamp, value_int) |> 
+  plotly::filter(timestamp == max(timestamp)) |> 
+  distinct() |> 
+  pull(value_int) # connect treats this value as an int, where
+
+# Replace with actual query, right now we hardode license allotment to 10
+license_allotment = 10
+
+warn_level = license_allotment-2
+
+fig <- plot_ly(
+  domain = list(x = c(0, 1), y = c(0, 1)),
+  value = connect_active_users,
+  title = list(text = "Active Connect Users"),
+  type = "indicator",
+  mode = "gauge+number+delta",
+  # delta = list(reference = 380),
+  gauge = list(
+    axis =list(range = list(NULL, license_allotment+2)),
+    steps = list(
+      list(range = c(0, warn_level), color = "lightgray"),
+      list(range = c(warn_level, license_allotment), color = "yellow"),
+      list(range = c(license_allotment, license_allotment+2), color = "red")))
+)
+fig <- fig %>%
+  plotly::layout(margin = list(l=20,r=30))
+
+fig
+```
+
+```r
+#| content: valuebox
+
+ct_users <- tbl(con, "users")
+list(
+  icon = "person-circle",
+  color = "info",
+  value = paste0(count(ct_users) |> pull(n), " connect users total")
+)
+```
+
+**\## Connect Content**
+
+```r
+#| content: valuebox
+#| title: "Connect Publications"
+
+ct_content <- tbl(con, "connect_content")
+content_counts <- ct_content |>
+  group_by(attribute_type) |>
+  summarise(count = max(value_int))
+
+list(
+  icon = "pin",
+  color = "info",
+  value = paste0(sum(pull(content_counts, count)), " publications")
+)
+```
+
+```r
+ct_content_visits <- tbl(con, "connect_content_visits_total")
+content_visits_list <- ct_content_visits |>
+  select(attribute_content_name, value_int) %>%
+  group_by(attribute_content_name) |>
+  summarise(count = max(value_int))
+
+content_visits_list
+```
+
+```r
+#| content: valuebox
+#| echo: false
+
+# Currently an empty table in the metrics collected from the internal Chronicle environment, there's no data to query yet
+
+# connect_content_visits_seconds <- tbl(con, "connect_content_session_duration_seconds")
+# content_visits_seconds_count <- connect_content_visits_seconds |>
+#  summarise(count = max(value_int))
+
+
+#content_visits_list <- ct_content_visits |>
+#  select(attribute_content_name, value_int) %>%
+#  group_by(attribute_content_name) |>
+#  summarise(count = max(value_int))
+
+#content_visits_list
+
+
+#list(
+#icon = "pin",
+#color = "info",
+#value = paste0(sum(pull(content_visits_seconds_count, count)), " seconds spent #on content visits")
+#)
+```
+
+```r
+users <- tbl(con, "users")
+user_list <- users %>%
+  select(id, username, last_active_at) %>%
+  arrange(desc("last_active_at"))
+
+user_list
+```
+
+
+
+
+
